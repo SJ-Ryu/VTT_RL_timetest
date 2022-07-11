@@ -28,7 +28,7 @@ class VTTEnv(gym.Env):
 
         # connect method ->p.DIRECT ( without render )
         #                ->p.GUI    ( with render )
-        self.client = p.connect(p.GUI)
+        self.client = p.connect(p.DIRECT)
         # Reduce length of episodes for RL algorithms
         p.setTimeStep(1/50, self.client)
 

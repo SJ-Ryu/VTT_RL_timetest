@@ -21,7 +21,6 @@ import torch.nn.init as init
 import torch.nn.utils.prune as prune
 import torch.backends.cudnn as cudnn
 
-from time import time
 import VTT_RL
 
 # ------------------------< SEED FIX >---------------------------------
@@ -74,7 +73,7 @@ class ReplayMemory(object):
 
     def __init__(self, capacity):
         self.memory = deque([], maxlen=capacity)
-
+ 
     def push(self, *args):
         """Save a transition"""
         self.memory.append(Transition(*args))
@@ -90,9 +89,9 @@ class DQN(nn.Module):
 
     def __init__(self, outputs):
         super(DQN, self).__init__()
-        self.conv1 = nn.Conv2d(1, 2, kernel_size=5, stride=1)
-        self.bn1 = nn.BatchNorm2d(2)
-        self.fc1 = nn.Linear(3498, 120)
+        self.conv1 = nn.Conv2d(1, 100, kernel_size=5, stride=1)
+        self.bn1 = nn.BatchNorm2d(100)
+        self.fc1 = nn.Linear(34980*5, 120)
         self.fc2 = nn.Linear(120, 84)
         self.fc3 = nn.Linear(84, outputs)
         self.dropout = nn.Dropout(0.5)
@@ -238,13 +237,12 @@ def optimize_model():
     if len(memory) < BATCH_SIZE:
         return
     transitions = memory.sample(BATCH_SIZE)
-    # Transpose the batch (see https://stackoverflow.com/a/19343/3343043 for
-    # detailed explanation). This linerts batch-array of Transitions
-    # to Transition of batch-arrays.
-    batch = Transition(*zip(*transitions))
 
-    # Compute a mask of non-final states and concatenate the batch elements
-    # (a final state would've been the one after which simulation ended)
+    start = time.time()
+    batch = Transition(*zip(*transitions))
+    print("\tbatch spread   : \t", time.time() - start)
+
+    start = time.time()
     non_final_mask = torch.tensor(tuple(map(lambda s: s is not None,
                                             batch.next_state)), device=device, dtype=torch.bool)
     non_final_next_states = torch.cat([s for s in batch.next_state
@@ -252,44 +250,44 @@ def optimize_model():
     state_batch  = torch.cat(batch.state )
     action_batch = torch.cat(batch.action)
     reward_batch = torch.cat(batch.reward)
+    print("\tnon_final_mask : \t", time.time() - start)
 
-    # Compute Q(s_t, a) - the model computes Q(s_t), then we select the
-    # columns of actions taken. These are the actions which would've been taken
-    # for each batch state according to policy_net
+    start = time.time()
     state_thr_policy_net = policy_net(
         state_batch).view(BATCH_SIZE, output, n_actions)
     state_action_values = state_thr_policy_net.gather(
         2, action_batch.view(BATCH_SIZE, output, 1).to(dtype=torch.int64))
-    # state_action_values = policy_net(state_batch).gather(1, action_batch)
+    print("\tstate_action   : \t", time.time() - start)
 
-    # Compute V(s_{t+1}) for all next states.
-    # Expected values of actions for non_final_next_states are computed based
-    # on the "older" target_net; selecting their best reward with max(1)[0].
-    # This is merged based on the mask, such that we'll have either the expected
-    # state value or 0 in case the state was final.
+    start = time.time()
     next_state_values = torch.zeros((BATCH_SIZE, output), device=device)
-    # next_state_values[non_final_mask] = target_net(non_final_next_states).max(1)[0].detach()
     next_state_thr_policy_net = target_net(
         non_final_next_states).view(BATCH_SIZE, output, n_actions)
     next_state_values[non_final_mask, :] = next_state_thr_policy_net.max(2)[
         0].detach()
-
     # Compute the expected Q values
     expected_state_action_values = (
         next_state_values * GAMMA) + reward_batch.unsqueeze(1).repeat(1, output)
-
+    print("\texpected value : \t", time.time() - start)
+    
+    start = time.time()
     # Compute Huber loss
-    # criterion = nn.SmoothL1Loss()
     loss = criterion(state_action_values.view(1, -1).float(),
                      expected_state_action_values.view(1, -1).float())
-
+    print("\tloss calculation: \t", time.time() - start)
+    
+    start = time.time()
     # Optimize the model
     optimizer.zero_grad()
     loss.backward()
     for param in policy_net.parameters():
         param.grad.data.clamp_(-1, 1)
         # print(param.grad)
+    print("\tzero grad & clamp: \t", time.time() - start)
+    
+    start = time.time()
     optimizer.step()
+    print("\toptimizer step   : \t", time.time() - start)
 
     return loss
 
@@ -332,7 +330,7 @@ if __name__ == '__main__':
 
     # model_path = "/home/elitedog/vttopt/VTT_pybullet_DQN/_agent_data/" + aim_agent_version        #Jeff's
     # model_path = "/home/sjryu/PythonEX/VTT_pybullet_DQN_model_compressed/_agent_data/" + aim_agent_version  # SJ's
-    model_path = cur_path + '/_agent data/' + aim_agent_version
+    model_path = cur_path + '/_agent_data/' + aim_agent_version
 
     if os.path.exists(model_path):
         reward_hisroty, loss_hisroty = load_model(model_path)
@@ -347,8 +345,16 @@ if __name__ == '__main__':
         for t in count():
 
             # Select and perform an action
+            start = time.time()
             action = select_action(state)
+            
+            print("action select  : \t", time.time() - start)
+            start = time.time()
+
             next_state, reward, done, _ = env.step(action)
+
+            print("step time      : \t", time.time() - start)
+            start = time.time()
 
             # survive_reward = math.exp(-0.0001*t)
             survive_reward = 0.0
@@ -366,8 +372,11 @@ if __name__ == '__main__':
             # storage next_state as state
             state = next_state
 
+            
+            start = time.time()
             # Perform one step of the optimization (on the policy network)
             loss = optimize_model()
+            print("optimize_model : \t", time.time() - start)
 
             if loss != None:
                 total_loss.append(loss)
@@ -380,8 +389,6 @@ if __name__ == '__main__':
                     loss_hisroty.append(0)
                 total_reward = []
                 total_loss = []
-                print("substep ======================= ", t,
-                      "\t|  i_episode ===================== ", i_episode)
                 time.sleep(0.01)
                 break
 
