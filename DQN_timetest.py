@@ -89,69 +89,48 @@ class DQN(nn.Module):
 
     def __init__(self, outputs):
         super(DQN, self).__init__()
-        self.conv1 = nn.Conv2d(1, 100, kernel_size=5, stride=1)
-        self.bn1 = nn.BatchNorm2d(100)
-        self.fc1 = nn.Linear(34980*5, 120)
-        self.fc2 = nn.Linear(120, 84)
-        self.fc3 = nn.Linear(84, outputs)
+        self.conv1 = nn.Conv2d(1, 2, kernel_size=5, stride=2)
+        self.bn1   = nn.BatchNorm2d(2)
+        self.conv2 = nn.Conv2d(2, 3, kernel_size=3, stride=1)
+        self.bn2   = nn.BatchNorm2d(3)
+        self.fc1   = nn.Linear(936, 500)
+        self.fc2   = nn.Linear(500, 200)
+        self.fc3   = nn.Linear(200, 50)
+        self.fc4   = nn.Linear(50, 40)
+        self.fc5   = nn.Linear(40, outputs)
         self.dropout = nn.Dropout(0.5)
 
     def forward(self, x):
-        x = x.to(device)
         x = self.bn1(self.conv1(x))
-        x = x.view(-1, math.prod(x.shape))
+        x = self.bn2(self.conv2(x))
+        x = x.view(-1, 936)
         x = F.relu(self.fc1(x))
         x = self.dropout(x)
         x = F.relu(self.fc2(x))
         x = self.dropout(x)
-        out = self.fc3(x)
+        x = F.relu(self.fc3(x))
+        x = self.dropout(x)
+        x = F.relu(self.fc4(x))
+        x = self.dropout(x)
+        out = self.fc5(x)
 
         return out
 
-
 BATCH_SIZE = 1  # 256 64 1
 GAMMA = 0.999
-EPS_START = 0.1
+EPS_START = 0.5
 EPS_END = 0.01
 EPS_DECAY = 200
 TARGET_UPDATE = 100
-LEARNING_RATE = 0.008  # 0.001 0.01
+LEARNING_RATE = 0.01  # 0.001 0.01
 
 env.reset()
 
 # Get number of actions from gym action space
 n_actions = env.action_space.n
 
-policy_net = DQN(env.action_space.n * output).to(device)  # cnn2d prune
-target_net = DQN(env.action_space.n * output).to(device)  # cnn2d prune
-
-
-# Global prune
-parameters_to_prune = (
-    (policy_net.conv1, 'weight'),
-    (policy_net.fc1,   'weight'),
-    (policy_net.fc2,   'weight'),
-    (policy_net.fc3,   'weight'),
-)
-
-prune.global_unstructured(
-    parameters_to_prune,
-    pruning_method=prune.L1Unstructured,
-    amount=0.2,
-)
-
-parameters_to_prune = (
-    (target_net.conv1, 'weight'),
-    (target_net.fc1,   'weight'),
-    (target_net.fc2,   'weight'),
-    (target_net.fc3,   'weight'),
-)
-
-prune.global_unstructured(
-    parameters_to_prune,
-    pruning_method=prune.L1Unstructured,
-    amount=0.2,
-)
+policy_net = torch.jit.script(DQN(env.action_space.n * output).to(device))  # cnn2d prune
+target_net = torch.jit.script(DQN(env.action_space.n * output).to(device))  # cnn2d prune
 
 total1   = sum(p.numel() for p in policy_net.parameters())
 trainpa1 = sum(p.numel() for p in policy_net.parameters() if p.requires_grad)
@@ -167,9 +146,8 @@ target_net.load_state_dict(policy_net.state_dict())
 target_net.eval()
 
 optimizer = optim.Adam(policy_net.parameters(), lr=LEARNING_RATE)
-# criterion = torch.jit.script(nn.MSELoss())
 criterion = torch.jit.script(nn.SmoothL1Loss())
-memory = ReplayMemory(10000)
+memory = ReplayMemory(BATCH_SIZE)
 
 steps_done = 0
 
@@ -246,10 +224,10 @@ def optimize_model():
     non_final_mask = torch.tensor(tuple(map(lambda s: s is not None,
                                             batch.next_state)), device=device, dtype=torch.bool)
     non_final_next_states = torch.cat([s for s in batch.next_state
-                                       if s is not None])
-    state_batch  = torch.cat(batch.state )
-    action_batch = torch.cat(batch.action)
-    reward_batch = torch.cat(batch.reward)
+                                       if s is not None]).to(device)
+    state_batch  = torch.cat(batch.state ).to(device)
+    action_batch = torch.cat(batch.action).to(device)
+    reward_batch = torch.cat(batch.reward).to(device)
     print("\tnon_final_mask : \t", time.time() - start)
 
     start = time.time()
@@ -263,12 +241,16 @@ def optimize_model():
     next_state_values = torch.zeros((BATCH_SIZE, output), device=device)
     next_state_thr_policy_net = target_net(
         non_final_next_states).view(BATCH_SIZE, output, n_actions)
+    print("\texpected value1 : \t", time.time() - start)
+    start = time.time()
     next_state_values[non_final_mask, :] = next_state_thr_policy_net.max(2)[
         0].detach()
+    print("\texpected value2 : \t", time.time() - start)
+    start = time.time()
     # Compute the expected Q values
     expected_state_action_values = (
         next_state_values * GAMMA) + reward_batch.unsqueeze(1).repeat(1, output)
-    print("\texpected value : \t", time.time() - start)
+    print("\texpected value3 : \t", time.time() - start)
     
     start = time.time()
     # Compute Huber loss
